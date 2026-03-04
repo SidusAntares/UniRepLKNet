@@ -24,11 +24,25 @@ from timm.data.mixup import Mixup
 from timm.models import create_model
 from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
 from timm.utils import ModelEma
+from torch.utils.data import WeightedRandomSampler
+
 from optim_factory import create_optimizer, LayerDecayValueAssigner
 
 from datasets import build_dataset
 from engine import train_one_epoch, evaluate
 from timematch_utils.train_utils import bool_flag
+from timematch_dataset import PixelSetData, create_evaluation_loaders
+from transforms import (
+    Normalize,
+    RandomSamplePixels,
+    RandomSampleTimeSteps,
+    ToTensor,
+    AddPixelLabels
+)
+from torchvision import transforms
+from collections import Counter
+from torch.utils import data
+import random
 
 from utils import NativeScalerWithGradNormCount as NativeScaler
 import utils
@@ -47,6 +61,74 @@ def str2bool(v):
         return False
     else:
         raise argparse.ArgumentTypeError('Boolean value expected.')
+
+def get_data_loaders(splits, config, balance_source=True):
+
+    strong_aug = transforms.Compose([
+            RandomSamplePixels(config.num_pixels),
+            RandomSampleTimeSteps(config.seq_length),
+            Normalize(),
+            ToTensor(),
+            AddPixelLabels()
+    ])
+
+    source_dataset = PixelSetData(config.data_root, config.source,
+            config.classes, strong_aug,
+            indices=splits[config.source]['train'],)
+
+    if balance_source:
+        source_labels = source_dataset.get_labels()
+        freq = Counter(source_labels)
+        class_weight = {x: 1.0 / freq[x] for x in freq}
+        source_weights = [class_weight[x] for x in source_labels]
+        sampler = WeightedRandomSampler(source_weights, len(source_labels))
+        print("using balanced loader for source")
+        source_loader = data.DataLoader(
+            source_dataset,
+            num_workers=config.num_workers,
+            pin_memory=True,
+            sampler=sampler,
+            batch_size=config.batch_size,
+            drop_last=True,
+        )
+    else:
+        source_loader = data.DataLoader(
+            source_dataset,
+            num_workers=config.num_workers,
+            pin_memory=True,
+            batch_size=config.batch_size,
+            shuffle=True,
+            drop_last=True,
+        )
+    print(f'size of source dataset: {len(source_dataset)} ({len(source_loader)} batches)')
+
+    return source_loader
+
+def create_train_val_test_folds(datasets, num_folds, num_indices, val_ratio=0.1, test_ratio=0.2):
+    folds = []
+    for _ in range(num_folds):
+        splits = {}
+        for dataset in datasets:
+            if type(num_indices) == dict:
+                indices = list(range(num_indices[dataset]))
+            else:
+                indices = list(range(num_indices))
+            n = len(indices)
+            n_test = int(test_ratio * n)
+            n_val = int(val_ratio * n)
+            n_train = n - n_test - n_val
+
+            random.shuffle(indices)
+
+            train_indices = set(indices[:n_train])
+            val_indices = set(indices[n_train:n_train + n_val])
+            test_indices = set(indices[-n_test:])
+            assert set.intersection(train_indices, val_indices, test_indices) == set()
+            assert len(train_indices) + len(val_indices) + len(test_indices) == n
+
+            splits[dataset] = {'train': train_indices, 'val': val_indices, 'test': test_indices}
+        folds.append(splits)
+    return folds
 
 def get_args_parser():
     parser = argparse.ArgumentParser('ConvNeXt training and evaluation script for image classification', add_help=False)
