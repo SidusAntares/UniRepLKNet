@@ -255,7 +255,7 @@ def create_evaluation_loaders(dataset_name, splits, config, sample_pixels_val=Fa
     print(f"val target data: {len(val_dataset)} ({len(val_loader)} batches)")
     print(f"test taget data: {len(test_dataset)} ({len(test_loader)} batches)")
 
-    return val_loader, test_loader
+    return val_dataset , val_loader, test_dataset , test_loader
 
 
 class GroupByShapesBatchSampler(torch.utils.data.BatchSampler):
